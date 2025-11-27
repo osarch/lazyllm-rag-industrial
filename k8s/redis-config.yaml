@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+  namespace: lazyllm-rag
+data:
+  # Redis集群模式配置（如需扩展为3副本集群时使用）
+  redis.conf: |
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 15000
+    cluster-require-full-coverage no
+    cluster-migration-barrier 1
+    bind 0.0.0.0
+    protected-mode yes
+    port 6379
+    timeout 0
+    tcp-keepalive 300
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite yes
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    save 900 1
+    save 300 10
+    save 60 10000
+    dbfilename dump.rdb
+    dir /data
+    maxmemory 8gb
+    maxmemory-policy allkeys-lru
+    loglevel notice
+    logfile ""
+    databases 16
+    always-show-logo no
