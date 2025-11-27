@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 15s  # 采集间隔：15秒（生产环境可设为30s）
+  evaluation_interval: 15s  # 评估间隔：15秒
+
+# 告警配置（可选，需配合Alertmanager）
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+# 采集配置
+scrape_configs:
+  # 1. 采集Prometheus自身指标
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # 2. 采集RAG应用指标（FastAPI+自定义指标）
+  - job_name: 'rag-app'
+    static_configs:
+      - targets: ['rag-app:8000']  # RAG服务容器名+端口
+    metrics_path: '/metrics'  # 指标接口路径（FastAPI自动暴露）
+    scrape_interval: 10s  # 高频采集：10秒一次（关注响应时间）
+
+  # 3. 采集Redis指标
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 20s
+    redis_exporter_config:
+      redis_addr: 'redis://redis:6379'
+
+  # 4. 采集GPU指标（需安装nvidia-dcgm-exporter，容器化部署时添加）
+  - job_name: 'gpu'
+    static_configs:
+      - targets: ['nvidia-dcgm-exporter:9400']  # GPU指标暴露端口
+    scrape_interval: 15s
