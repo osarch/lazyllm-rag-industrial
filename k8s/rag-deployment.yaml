@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lazyllm-rag  # 独立命名空间，隔离资源
+  labels:
+    app: lazyllm-rag
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-config
+  namespace: lazyllm-rag
+data:
+  # 应用配置参数（环境变量统一管理）
+  REDIS_URL: "redis://redis-service:6379/0"
+  PYTHONPATH: "/app"
+  LOG_LEVEL: "INFO"
+  WORKERS: "8"  # 工作进程数=CPU核心数（推荐配置）
+  CUDA_VISIBLE_DEVICES: "0"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-models-pvc
+  namespace: lazyllm-rag
+spec:
+  accessModes:
+    - ReadWriteMany  # 多副本共享访问（NFS必需）
+  storageClassName: "nfs-storageclass"  # 关联NFS存储类
+  resources:
+    requests:
+      storage: 50Gi  # 模型存储需求（50GB足够）
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-data-pvc
+  namespace: lazyllm-rag
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "nfs-storageclass"
+  resources:
+    requests:
+      storage: 100Gi  # 数据+向量库存储需求（100GB）
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-deployment
+  namespace: lazyllm-rag
+  labels:
+    app: rag-app
+spec:
+  replicas: 2  # 2个副本，高可用部署
+  selector:
+    matchLabels:
+      app: rag-app
+  strategy:
+    rollingUpdate:
+      maxSurge: 1  # 滚动更新时最大额外副本数
+      maxUnavailable: 0  # 滚动更新时最小可用副本数（零停机）
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: rag-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: rag-app
+        image: ${DOCKER_REGISTRY}/lazyllm-rag:v1.0.0  # 替换为你的镜像仓库地址
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapKeyRef:
+            name: rag-config
+            optional: false
+        resources:
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+            nvidia.com/gpu: 1  # GPU资源限制（单副本1块GPU）
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: models-volume
+          mountPath: /app/models
+        - name: data-volume
+          mountPath: /app/data
+        - name: vector-db-volume
+          mountPath: /app/vector_db
+        - name: multimodal-vector-db-volume
+          mountPath: /app/multimodal_vector_db
+        - name: logs-volume
+          mountPath: /app/logs
+        livenessProbe:  # 存活探针（容器崩溃自动重启）
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60  # 初始化延迟（模型加载需要时间）
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:  # 就绪探针（未就绪不接收流量）
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:  # 启动探针（启动超时自动重启）
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 10
+          periodSeconds: 30
+      volumes:
+      - name: models-volume
+        persistentVolumeClaim:
+          claimName: rag-models-pvc
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: rag-data-pvc
+      - name: vector-db-volume
+        emptyDir: {}  # 向量库临时存储（或改为PVC持久化）
+      - name: multimodal-vector-db-volume
+        emptyDir: {}
+      - name: logs-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-service
+  namespace: lazyllm-rag
+spec:
+  selector:
+    app: rag-app
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP  # 集群内部访问（外部访问可改为NodePort/LoadBalancer）
