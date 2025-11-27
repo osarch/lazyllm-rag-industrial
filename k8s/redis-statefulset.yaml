@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: lazyllm-rag
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    protected-mode yes
+    port 6379
+    timeout 0
+    tcp-keepalive 300
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite yes
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    save 900 1
+    save 300 10
+    save 60 10000
+    dbfilename dump.rdb
+    dir /data
+    maxmemory 8gb
+    maxmemory-policy allkeys-lru
+    loglevel notice
+    logfile ""
+    databases 16
+    always-show-logo no
+    set-proc-title yes
+    proc-title-template "{title} {port}:{pid}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data-pvc
+  namespace: lazyllm-rag
+spec:
+  accessModes:
+    - ReadWriteOnce  # Redis单副本读写（StatefulSet每个副本独立PVC）
+  storageClassName: "nfs-storageclass"
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-statefulset
+  namespace: lazyllm-rag
+spec:
+  serviceName: redis-service  # Headless Service名称
+  replicas: 1  # Redis单副本（生产环境如需集群可改为3）
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "6379"
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          limits:
+            cpu: "2"
+            memory: "8Gi"
+          requests:
+            cpu: "1"
+            memory: "4Gi"
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /etc/redis/redis.conf
+          subPath: redis.conf
+        livenessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs-storageclass"
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: lazyllm-rag
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  clusterIP: None  # Headless Service（StatefulSet必需）
