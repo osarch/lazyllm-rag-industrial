@@ -1,0 +1,129 @@
+version: '3.8'  # 兼容Docker 20.10+，支持GPU资源配置
+
+# 自定义网络：隔离容器，提升安全性和网络稳定性
+networks:
+  lazyllm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16  # 自定义子网，避免和其他容器冲突
+
+services:
+  # 1. Redis缓存服务（生产级配置：AOF持久化+健康检查）
+  redis:
+    image: redis:7.2-alpine  # 轻量版本，镜像大小仅5MB左右
+    container_name: lazyllm-redis
+    ports:
+      - "6379:6379"  # 端口映射（主机:容器）
+    volumes:
+      - ./redis/data:/data  # 数据持久化目录（挂载到主机）
+      - ./redis/redis.conf:/etc/redis/redis.conf  # 自定义配置文件
+    restart: always  # 容器退出自动重启（高可用保障）
+    command: redis-server /etc/redis/redis.conf  # 加载自定义配置
+    networks:
+      - lazyllm-network
+    healthcheck:  # 健康检查：确保Redis就绪后再启动其他服务
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s  # 检查间隔
+      timeout: 5s    # 超时时间
+      retries: 3     # 重试次数（失败则标记为不健康）
+    environment:
+      - TZ=Asia/Shanghai  # 时区配置（和主机一致）
+
+  # 2. RAG应用服务（核心服务：FastAPI+LazyLLM+GPU加速）
+  rag-app:
+    build:
+      context: ../  # 构建上下文：项目根目录（确保能访问api/、rag/等目录）
+      dockerfile: docker/Dockerfile  # Dockerfile路径
+    container_name: lazyllm-rag-app
+    ports:
+      - "8000:8000"  # FastAPI接口端口
+    volumes:
+      - ../vector_db:/app/vector_db  # 向量数据库持久化
+      - ../multimodal_vector_db:/app/multimodal_vector_db  # 多模态向量库
+      - ../models:/app/models  # 模型目录挂载（避免重复下载）
+      - ../data:/app/data  # 数据目录挂载（用户可替换为实际数据）
+      - ../logs:/app/logs  # 日志目录挂载（方便排查问题）
+    depends_on:
+      redis:
+        condition: service_healthy  # 依赖Redis健康状态
+    restart: always  # 应用崩溃自动重启
+    environment:
+      - REDIS_URL=redis://redis:6379/0  # Redis连接地址（容器名作为hostname）
+      - PYTHONPATH=/app  # Python路径配置（确保能导入api/、rag/模块）
+      - CUDA_VISIBLE_DEVICES=0  # 指定GPU卡号（多GPU可改为"0,1"）
+      - LOG_LEVEL=INFO  # 日志级别：INFO（生产）/DEBUG（开发）
+      - WORKERS=4  # Uvicorn工作进程数（推荐=CPU核心数，如8核设为8）
+      - TZ=Asia/Shanghai
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # 申请1块GPU
+              capabilities: [gpu]  # 声明GPU资源（需安装NVIDIA Docker Runtime）
+    networks:
+      - lazyllm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # 3. Prometheus监控服务（收集指标：响应时间、GPU使用率、缓存命中率）
+  prometheus:
+    image: prom/prometheus:v2.45.0  # 稳定版本（避免兼容性问题）
+    container_name: lazyllm-prometheus
+    ports:
+      - "9090:9090"  # Prometheus端口
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml  # 监控配置
+      - ./prometheus/data:/prometheus/data  # 监控数据持久化
+    restart: always
+    networks:
+      - lazyllm-network
+    environment:
+      - TZ=Asia/Shanghai
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'  # 监控数据保留30天
+
+  # 4. Grafana可视化服务（监控面板：可视化指标+告警）
+  grafana:
+    image: grafana/grafana:10.1.2  # 稳定版本
+    container_name: lazyllm-grafana
+    ports:
+      - "3000:3000"  # Grafana端口
+    volumes:
+      - ./grafana/data:/var/lib/grafana  # Grafana数据持久化（面板配置、用户信息）
+      - ./grafana/dashboard.json:/etc/grafana/provisioning/dashboards/rag-dashboard.json  # 面板模板
+      - ./grafana/provisioning.yaml:/etc/grafana/provisioning/datasources/prometheus.yaml  # 数据源配置
+    depends_on:
+      - prometheus  # 依赖Prometheus服务
+    restart: always
+    networks:
+      - lazyllm-network
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin@2024  # 管理员密码（生产环境建议修改为复杂密码）
+      - GF_USERS_ALLOW_SIGN_UP=false  # 禁用注册（安全保障）
+      - GF_USERS_ALLOW_ORG_CREATE=false  # 禁用创建组织
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/rag-dashboard.json  # 默认面板
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # 5. 缓存清理服务（定时清理过期缓存，避免Redis内存溢出）
+  cache-cleaner:
+    image: redis:7.2-alpine
+    container_name: lazyllm-cache-cleaner
+    depends_on:
+      - redis
+    restart: always
+    networks:
+      - lazyllm-network
+    environment:
+      - TZ=Asia/Shanghai
+    command: sh -c "while true; do redis-cli -h redis -p 6379 FLUSHDB; echo '📅 缓存清理完成（每天一次）'; sleep 86400; done"  # 每天清理一次
