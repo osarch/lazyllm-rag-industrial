@@ -1,0 +1,17 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-storageclass
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"  # 不设为默认存储类
+provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
+parameters:
+  archiveOnDelete: "true"  # 删除PVC时归档数据（避免误删）
+  pathPattern: "${.PVC.namespace}-${.PVC.name}"  # 路径格式：命名空间-PVC名称
+  server: 192.168.1.100  # 替换为你的NFS服务器IP
+  share: /data/nfs/lazyllm-rag  # 替换为你的NFS共享目录
+reclaimPolicy: Retain  # 回收策略：保留（生产环境推荐）
+allowVolumeExpansion: true  # 允许PVC扩容
+mountOptions:
+  - hard  # 硬挂载（数据一致性优先）
+  - nfsvers=4.1  # NFS版本（适配主流服务器）
